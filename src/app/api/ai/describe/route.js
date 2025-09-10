@@ -66,8 +66,8 @@ function fallbackDescriptions(data = {}, length = "medium") {
     ? " Photos showcase the space and natural light."
     : "";
 
-  const nBiz = length === "short" ? 2 : length === "long" ? 4 : 3;
-  const nEmo = length === "short" ? 2 : length === "long" ? 4 : 3;
+  const nBiz = length === "short" ? 2 : length === "long" ? 6 : 4;
+  const nEmo = length === "short" ? 2 : length === "long" ? 6 : 4;
 
   const businessSentences = [];
   businessSentences.push(
@@ -138,10 +138,10 @@ function buildUserPrompt(data) {
 
   const extra =
     data.length === "short"
-      ? "Keep it very brief."
+      ? "Target ~45–70 words total (about 2–3 sentences per style)."
       : data.length === "long"
-      ? "Be a bit richer, but still concise."
-      : "Balanced length.";
+      ? "Target ~160–220 words total (about 5–7 sentences per style)."
+      : "Target ~90–130 words total (about 3–4 sentences per style).";
   const imgNote = data.useImages
     ? "You may infer general positives from having photos (light, finishes) but never hallucinate specific details."
     : "Do not use any image-based assumptions.";
