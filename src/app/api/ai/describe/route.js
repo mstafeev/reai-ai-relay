@@ -1,171 +1,297 @@
-import { NextResponse } from "next/server";
+// src/app/api/ai/describe/route.ts
+import { NextRequest, NextResponse } from "next/server";
 
-// Fallbacks (English)
-function genTitle(b) {
-  const parts = [];
-  if (typeof b.bedrooms === "number") parts.push(`${b.bedrooms} BR`);
-  if (typeof b.bathrooms === "number") parts.push(`${b.bathrooms} BA`);
-  if (typeof b.area === "number") parts.push(`~${b.area} ft²`);
-  const meta = parts.join(" · ");
-  const addr = b.address ? ` — ${b.address}` : "";
-  const base = meta ? `${meta}` : "Property";
-  return `${base}${addr}`;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type Mode = "title" | "descriptions" | "all";
+type Length = "short" | "medium" | "long";
+
+type ReqBody = {
+  title?: string;
+  address?: string;
+  price?: string;
+  images?: string[];
+  bedrooms?: number;
+  bathrooms?: number;
+  area?: number;
+  mode?: Mode;
+  length?: Length;
+  useImages?: boolean;
+};
+
+function json(data: any, init?: ResponseInit) {
+  return NextResponse.json(data, init);
 }
-function genBusiness(b) {
-  const t = (b.title || "").trim() || genTitle(b);
-  const area = b.area ? ` ~${b.area} ft².` : "";
-  return `${t}.${area} Functional layout, clean lobby, convenient access to transport and daily amenities. Ready for showings.`;
-}
-function genEmotional(b) {
-  const t = (b.title || "").trim() || "A cozy home";
-  return `${t} with bright living areas and quiet bedrooms; balcony/outsides for evenings. Parks, cafes, and good schools nearby. Great for living or investment.`;
+
+function isNonEmpty(s?: string) {
+  return typeof s === "string" && s.trim().length > 0;
 }
 
-export async function POST(req) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  const model  = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const base   = process.env.SOURCE_BASE_URL || "https://reality.na4u.ru";
-  const maxN   = Number(process.env.MAX_IMAGE_COUNT || 6);
+function parsePriceToNumber(price?: string): number | undefined {
+  if (!price) return undefined;
+  const num = Number(String(price).replace(/[^\d.]/g, "").replace(",", "."));
+  return Number.isFinite(num) ? num : undefined;
+}
 
-  const b = (await req.json().catch(() => ({}))) || {};
-  b.style     = b.style     || "both";
-  b.mode      = b.mode      || "all";
-  b.length    = b.length    || "medium";
-  b.useImages = b.useImages !== false;
+function featList(bedrooms?: number, bathrooms?: number, area?: number) {
+  const parts: string[] = [];
+  if (typeof bedrooms === "number") parts.push(`${bedrooms} BR`);
+  if (typeof bathrooms === "number") parts.push(`${bathrooms} BA`);
+  if (typeof area === "number") parts.push(`${area} ft²`);
+  return parts.join(" · ");
+}
 
-  // absolutize relative /api/uploads/.. URLs
-  const absImages = Array.isArray(b.images)
-    ? b.images
-        .filter(u => typeof u === "string")
-        .map(u => (u.startsWith("http") ? u : `${base}${u}`))
-        .slice(0, maxN)
-    : [];
+function fallbackTitle(data: ReqBody) {
+  const parts: string[] = [];
+  if (data.bedrooms) parts.push(`${data.bedrooms}-Bedroom`);
+  if (data.area) parts.push(`${data.area} ft²`);
+  const head = parts.length ? parts.join(" ") : "Modern Home";
+  const loc = data.address ? ` in ${data.address}` : "";
+  return `${head}${loc}`.slice(0, 120);
+}
 
-  const price = b.price == null || b.price === "" ? "" : `\n- Price (USD): ${typeof b.price === "number" ? b.price : String(b.price)}`;
-  const beds  = b.bedrooms ? `\n- Bedrooms: ${b.bedrooms}` : "";
-  const baths = b.bathrooms ? `\n- Bathrooms: ${b.bathrooms}` : "";
-  const area  = b.area ? `\n- Area: ${b.area} ft²` : "";
-  const notes = (b.notes || "").trim() ? `\n- Notes: ${String(b.notes).trim()}` : "";
+function fallbackDescriptions(data: ReqBody, length: Length = "medium") {
+  const feats = featList(data.bedrooms, data.bathrooms, data.area);
+  const priceN = parsePriceToNumber(data.price);
+  const priceText =
+    typeof priceN === "number" ? ` Priced around $${Math.round(priceN).toLocaleString()}.` : "";
+  const hasImages = Array.isArray(data.images) && data.images.length > 0;
+  const imgHint = hasImages ? " Photos showcase the space and natural light." : "";
 
-  const modeLine =
-    b.mode === "title"        ? `- Generate ONLY "title"; set "business" and "emotional" to empty strings.`
-  : b.mode === "descriptions" ? `- Generate ONLY "business" and "emotional"; set "title" to empty string.`
-                              : `- Generate all three keys.`;
+  const nBiz = length === "short" ? 2 : length === "long" ? 4 : 3;
+  const nEmo = length === "short" ? 2 : length === "long" ? 4 : 3;
 
-  const styleLine = b.style && b.style !== "both"
-    ? `- For descriptions, generate only "${b.style}" and set the other key to an empty string.`
-    : "";
+  const businessSentences: string[] = [];
+  businessSentences.push(
+    `Turn-key property${data.address ? ` at ${data.address}` : ""} with ${feats || "balanced layout"}.`
+  );
+  if (data.area)
+    businessSentences.push(
+      `Efficient floor plan across ${data.area} square feet with flexible living zones.`
+    );
+  if (data.bedrooms || data.bathrooms)
+    businessSentences.push(
+      `Comfortable ${data.bedrooms ?? "—"} bedrooms and ${data.bathrooms ?? "—"} bathrooms for daily convenience.`
+    );
+  businessSentences.push(
+    `Ready for immediate move-in with straightforward ownership and utilities.${priceText}`
+  );
+  businessSentences.push(`Suitable for personal living or as a steady rental asset.${imgHint}`);
 
-  const lenReq =
-    b.length === "long"
-      ? `- "business": 5–8 sentences; "emotional": 5–8 sentences.`
-      : b.length === "short"
-      ? `- "business": 1–2 sentences; "emotional": 1–2 sentences.`
-      : `- "business": 2–4 sentences; "emotional": 2–4 sentences.`;
+  const emotionalSentences: string[] = [];
+  emotionalSentences.push(
+    `Step inside and feel the calm — soft daylight and a welcoming flow set the tone.`
+  );
+  emotionalSentences.push(
+    `Cook, gather, and unwind in spaces that bring people together without feeling crowded.`
+  );
+  if (data.address)
+    emotionalSentences.push(`The neighborhood around ${data.address} adds a sense of belonging.`);
+  if (hasImages)
+    emotionalSentences.push(`The photos hint at warm evenings and lazy weekends already waiting here.`);
+  emotionalSentences.push(`It’s a place that feels like home from the first minute.`);
 
-  const imageLine = b.useImages && absImages.length
-    ? `- You are given up to ${absImages.length} property photos. Derive factual details from images (finishes, light, view, plan hints). Do NOT hallucinate.`
-    : `- No images available; rely only on text.`;
+  const business = businessSentences.slice(0, nBiz).join(" ");
+  const emotional = emotionalSentences.slice(0, nEmo).join(" ");
+  return { business, emotional };
+}
 
-  const prompt = `
-You are a real-estate copywriter. Produce high-quality English copy for a property listing.
+function buildSystemPrompt() {
+  return `You are a helpful real-estate copywriter. Output STRICT JSON only. No prose outside JSON. Use concise, clear English. Avoid emojis and fluff.`;
+}
 
-INPUT:
-- Title: ${b.title ?? ""}
-- Address: ${b.address ?? ""}${price}${beds}${baths}${area}${notes}
-
-REQUIREMENTS:
-- Return STRICT JSON only.
-- Keys: "title", "business", "emotional".
-- "title": 3–10 words, no emojis/markdown; may include BR/BA/ft²/price if grounded.
-${lenReq}
-- Be specific, avoid generic fluff; highlight unique, verifiable features only. No invented facts.
-${modeLine}
-${styleLine}
-${imageLine}
-`.trim();
-
-  if (!apiKey) {
-    const title = genTitle(b);
-    const business  = b.mode === "title"        ? "" : (b.style === "emotional" ? "" : genBusiness({ ...b, title }));
-    const emotional = b.mode === "title" || b.style === "business" ? "" : genEmotional({ ...b, title });
-    return NextResponse.json({ ok: true, title, texts: { business, emotional }, source: "fallback" });
-  }
-
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${apiKey}`,
+function buildUserPrompt(data: ReqBody) {
+  const priceN = parsePriceToNumber(data.price);
+  const features = {
+    address: data.address || null,
+    price_usd: priceN ?? null,
+    bedrooms: data.bedrooms ?? null,
+    bathrooms: data.bathrooms ?? null,
+    area_ft2: data.area ?? null,
+    images_count: Array.isArray(data.images) ? data.images.length : 0,
   };
-  if (process.env.OPENAI_ORG_ID) headers["OpenAI-Organization"] = process.env.OPENAI_ORG_ID;
-  if (process.env.OPENAI_PROJECT_ID) headers["OpenAI-Project"] = process.env.OPENAI_PROJECT_ID;
 
-  const parts = [{ type: "text", text: prompt }];
-  if (b.useImages && absImages.length) {
-    for (const url of absImages) {
-      parts.push({ type: "image_url", image_url: { url, detail: "high" } });
-    }
+  const askTitle = `Generate a succinct listing title (max 90 chars) focusing on the top value prop.`;
+  const askDesc = `Generate two short descriptions:
+- "business": 2–4 concise sentences with factual selling points (layout, size, condition, area highlights, potential ROI; no emojis);
+- "emotional": 2–4 warm sentences evoking comfort and lifestyle (no fluff).`;
+
+  const extra =
+    data.length === "short"
+      ? "Keep it very brief."
+      : data.length === "long"
+      ? "Be a bit richer, but still concise."
+      : "Balanced length.";
+  const imgNote = data.useImages
+    ? "You may infer general positives from having photos (light, finishes) but never hallucinate specific details."
+    : "Do not use any image-based assumptions.";
+
+  return `INPUT:
+${JSON.stringify(features)}
+
+TASK:
+${askTitle}
+${askDesc}
+
+STYLE:
+- ${extra}
+- ${imgNote}
+
+OUTPUT:
+Return a single JSON object:
+{
+  "title": "string",
+  "texts": {
+    "business": "string",
+    "emotional": "string"
+  }
+}`;
+}
+
+/* === ВАЖНО: общий тип ответа LLM === */
+type LlmResp = {
+  title?: string;
+  business?: string;
+  emotional?: string;
+  status: "ok" | "missing_key" | "error";
+  error?: string;
+};
+
+async function callOpenAI(data: ReqBody): Promise<LlmResp> {
+  const apiKey =
+    process.env.OPENAI_API_KEY || process.env.OPENAI_APIKEY || process.env.OPENAI_KEY;
+  if (!apiKey) {
+    return { status: "missing_key" };
   }
 
   try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers,
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
       body: JSON.stringify({
         model,
-        max_tokens: b.length === "long" ? 900 : b.length === "short" ? 300 : 600,
         messages: [
-          { role: "system", content: "You write vivid, precise real-estate copy in English. Output JSON only, never prose." },
-          { role: "user", content: parts },
+          { role: "system", content: buildSystemPrompt() },
+          { role: "user", content: buildUserPrompt(data) },
         ],
-        temperature: 0.6,
+        temperature: 0.7,
         response_format: { type: "json_object" },
       }),
     });
 
-    if (!r.ok) {
-      const errText = await r.text().catch(() => "");
-      let msg = errText; try { msg = JSON.parse(errText)?.error?.message || errText; } catch {}
-      const title = genTitle(b);
-      const business  = b.mode === "title"        ? "" : (b.style === "emotional" ? "" : genBusiness({ ...b, title }));
-      const emotional = b.mode === "title" || b.style === "business" ? "" : genEmotional({ ...b, title });
-      return NextResponse.json({
-        ok: true, title, texts: { business, emotional }, source: "fallback_llm_error",
-        llm_status: r.status, llm_error: (msg || "unknown").slice(0, 500),
-      });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = j?.error?.message || `HTTP ${res.status}`;
+      return { status: "error", error: msg };
     }
 
-    const data = await r.json();
-    const raw  = data?.choices?.[0]?.message?.content ?? "{}";
-    const start = raw.indexOf("{"); const end = raw.lastIndexOf("}");
-    const jsonStr = start >= 0 && end > start ? raw.slice(start, end + 1) : "{}";
-    let parsed = {}; try { parsed = JSON.parse(jsonStr); } catch {}
+    const content: string | undefined = j?.choices?.[0]?.message?.content;
+    if (!content || typeof content !== "string") {
+      return { status: "error", error: "empty_response" };
+    }
 
-    const title = typeof parsed.title === "string" ? parsed.title.trim() : "";
-    const business  = b.mode !== "title" && b.style !== "emotional" && typeof parsed.business === "string" ? parsed.business.trim() : "";
-    const emotional = b.mode !== "title" && b.style !== "business" && typeof parsed.emotional === "string" ? parsed.emotional.trim() : "";
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return { status: "error", error: "bad_json" };
+    }
 
-    return NextResponse.json({
-      ok: true,
-      title: title || genTitle(b),
-      texts: {
-        business: business  || (b.mode === "title"        ? "" : (b.style === "emotional" ? "" : genBusiness({ ...b, title: title || genTitle(b) }))),
-        emotional: emotional || (b.mode === "title" || b.style === "business" ? "" : genEmotional({ ...b, title: title || genTitle(b) })),
-      },
-      source: "llm",
-    });
-  } catch (e) {
-    const title = genTitle(b);
-    const business  = b.mode === "title"        ? "" : (b.style === "emotional" ? "" : genBusiness({ ...b, title }));
-    const emotional = b.mode === "title" || b.style === "business" ? "" : genEmotional({ ...b, title });
-    return NextResponse.json({ ok: true, title, texts: { business, emotional }, source: "fallback_exception", llm_error: e?.message || "exception" });
+    const title = isNonEmpty(parsed?.title) ? String(parsed.title) : undefined;
+    const business = isNonEmpty(parsed?.texts?.business)
+      ? String(parsed.texts.business)
+      : undefined;
+    const emotional = isNonEmpty(parsed?.texts?.emotional)
+      ? String(parsed.texts.emotional)
+      : undefined;
+
+    return { title, business, emotional, status: "ok" };
+  } catch (e: any) {
+    return { status: "error", error: String(e?.message || e) };
   }
 }
 
-export async function GET() {
-  return NextResponse.json({
-    ok: true,
-    service: "reai-ai-relay",
-    path: "/api/ai/describe",
-    usage: "POST with {title?,address?,price?,images?[],bedrooms?,bathrooms?,area?,style?,mode?,length?,useImages?}",
-  });
+function hasOpenAIKey() {
+  return !!(
+    process.env.OPENAI_API_KEY ||
+    process.env.OPENAI_APIKEY ||
+    process.env.OPENAI_KEY
+  );
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = (await req.json().catch(() => ({}))) as ReqBody;
+    const mode: Mode = (body.mode as Mode) || "all";
+    const length: Length = (body.length as Length) || "medium";
+
+    // --- Проверка ключа до вызова провайдера ---
+    const keyPresent = hasOpenAIKey();
+
+    // 1) Попытка LLM (или пропускаем, если ключа нет)
+    const llm: LlmResp = keyPresent
+      ? await callOpenAI({ ...body, length })
+      : { status: "missing_key" };
+
+    // 2) Fallback + смешивание
+    let title = body.title?.trim() || "";
+    let business = "";
+    let emotional = "";
+
+    if (isNonEmpty(llm.title)) title = (llm.title as string).slice(0, 200);
+    if (isNonEmpty(llm.business)) business = llm.business as string;
+    if (isNonEmpty(llm.emotional)) emotional = llm.emotional as string;
+
+    const needTitle = mode === "title" || mode === "all";
+    const needTexts = mode === "descriptions" || mode === "all";
+
+    if (needTitle && !isNonEmpty(title)) {
+      title = fallbackTitle(body);
+    }
+    if (needTexts && (!isNonEmpty(business) || !isNonEmpty(emotional))) {
+      const fb = fallbackDescriptions(body, length);
+      if (!isNonEmpty(business)) business = fb.business;
+      if (!isNonEmpty(emotional)) emotional = fb.emotional;
+    }
+
+    const payload: any = {
+      ok: true,
+      source: llm.status === "ok" ? "openai" : "fallback",
+      llm_status: llm.status,
+    };
+    if (llm.error) payload.llm_error = llm.error;
+    if (!keyPresent && !payload.llm_error) {
+      payload.llm_error = "MISSING_API_KEY: set OPENAI_API_KEY in environment";
+    }
+
+    if (mode === "title") {
+      payload.title = title;
+    } else if (mode === "descriptions") {
+      payload.texts = { business, emotional };
+    } else {
+      payload.title = title;
+      payload.texts = { business, emotional };
+    }
+
+    return json(payload);
+  } catch (e: any) {
+    try {
+      const fb = fallbackDescriptions({}, "medium");
+      return json({
+        ok: true,
+        source: "fallback",
+        llm_status: "error",
+        llm_error: String(e?.message || e),
+        title: "Modern Home",
+        texts: { business: fb.business, emotional: fb.emotional },
+      });
+    } catch {
+      return json({ ok: false, error: "AI_FATAL" }, { status: 500 });
+    }
+  }
 }
