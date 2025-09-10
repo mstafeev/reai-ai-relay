@@ -192,6 +192,7 @@ async function callOpenAI(data) {
           { role: "system", content: buildSystemPrompt() },
           { role: "user", content: buildUserPrompt(data) },
         ],
+        max_tokens: 400, // ← добавить эту строку
         temperature: 0.7,
         response_format: { type: "json_object" },
       }),
